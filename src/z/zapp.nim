@@ -176,7 +176,7 @@ type
     ZAPP_MOUSEBUTTON_RIGHT = 1
     ZAPP_MOUSEBUTTON_MIDDLE = 2
 
-  ZappEvent = object
+  ZappEvent* = object
     frameCount: uint64
     kind: ZappEventKind
     keyCode: ZappKeyCode
@@ -193,24 +193,24 @@ type
     frameBufferWidth: int
     frameBufferHeight: int
 
-  ZappDesc = object
-    initCb: (proc())
-    frameCb: (proc())
-    cleanUpCb: (proc())
-    eventCb: (proc(e: var ZappEvent))
+  ZappDesc* = object
+    initCb*: (proc())
+    frameCb*: (proc())
+    cleanUpCb*: (proc())
+    eventCb*: (proc(e: var ZappEvent))
     userData: pointer
     initUserDataCb: (proc(d: pointer))
     frameUserDataCb: (proc(d: pointer))
     cleanUpUserDataCb: (proc(d: pointer))
     eventUserDataCb: (proc(e: var ZappEvent, d: pointer))
-    width: int
-    height: int
+    width*: int
+    height*: int
     sampleCount: int
     swapInterval: int
     highDpi: bool
     fullscreen: bool
     alpha: bool
-    windowTitle: string
+    windowTitle*: string
     userCursor: bool
 
   Zapp = object
@@ -353,6 +353,34 @@ when defined(windows):
       if obj != nil:
         discard `obj`.lpVtbl.Release(obj)
         obj = nil
+    
+    proc zappD3d11GetDevice*(): pointer =
+      assert(zapp.valid)
+      when defined(Z_D3D11):
+        result = zappD3d11Device
+      else:
+        result = nil
+    
+    proc zappD3d11GetDeviceContext*(): pointer =
+      assert(zapp.valid)
+      when defined(Z_D3D11):
+        result = zappD3d11DeviceContext
+      else:
+        result = nil
+
+    proc zappD3d11GetRenderTargetView*(): pointer =
+      assert(zapp.valid)
+      when defined(Z_D3D11):
+        result = zappD3d11Rtv
+      else:
+        result = nil
+
+    proc zappD3d11GetDepthStencilView*(): pointer =
+      assert(zapp.valid)
+      when defined(Z_D3D11):
+        result = zappD3d11Dsv
+      else:
+        result = nil
 
     proc zappD3d11CreateDeviceAndSwapchain() =
       var scDesc = addr zappDxgiSwapChainDesc
