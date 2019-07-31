@@ -1,4 +1,6 @@
 when defined(windows):
+  when not defined(WIN32_LEAN_AND_MEAN):
+    const WIN32_LEAN_AND_MEAN = 1
   import winim/lean
   when defined(Z_D3D11):
     when not defined(D3D11_NO_HELPERS):
@@ -19,7 +21,7 @@ type
 
   MonitorDpiType = distinct int32
   
-  ZappEventKind = enum
+  ZappEventKind {.size: sizeof(uint32).} = enum
     ZAPP_EVENTKIND_INVALID,
     ZAPP_EVENTKIND_KEY_DOWN,
     ZAPP_EVENTKIND_KEY_UP,
@@ -42,6 +44,7 @@ type
     ZAPP_EVENTKIND_UPDATE_CURSOR,
     ZAPP_EVENTKIND_QUIT_REQUESTED,
     ZAPP_EVENTKIND_COUNT
+    ZAPP_EVENTKIND_FORCE_U32 = 0x7FFFFFF
 
   # key codes have same name and values as GLFW key codes
   ZappKeyCode = enum
