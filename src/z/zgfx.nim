@@ -1,12 +1,15 @@
 const 
   ZG_STRING_SIZE = 16
+  ZG_SLOT_SHIFT = 16
+  ZG_SLOT_MASK = (1 shl ZG_SLOT_SHIFT) - 1
+  ZG_MAX_POOL_SIZE = (1 shl ZG_SLOT_SHIFT)
   ZG_DEFAULT_BUFFER_POOL_SIZE = 128
   ZG_DEFAULT_IMAGE_POOL_SIZE = 128
   ZG_DEFAULT_SHADER_POOL_SIZE = 32
   ZG_DEFAULT_PIPELINE_POOL_SIZE = 64
   ZG_DEFAULT_PASS_POOL_SIZE = 16
   ZG_DEFAULT_CONTEXT_POOL_SIZE = 16
-  ZG_INVALID_ID = 0
+  ZG_INVALID_ID = 0'u32
   ZG_NUM_SHADER_STAGES = 2
   ZG_NUM_INFLIGHT_FRAMES = 2
   ZG_MAX_COLOR_ATTACHMENTS = 4
@@ -17,6 +20,7 @@ const
   ZG_MAX_VERTEX_ATTRIBUTES = 16
   ZG_MAX_MIPMAPS = 16
   ZG_MAX_TEXTUREARRAY_LAYERS = 128
+  ZG_INVALID_SLOT_INDEX = 0
 
 template zgDef(val, def: untyped): untyped =
   (if ((val) == 0): (def) else: (val))
@@ -454,7 +458,7 @@ when defined(Z_D3D11):
       zeroSrvs: array[ZG_MAX_SHADERSTAGE_IMAGES, ptr ID3D11ShaderResourceView]
       zeroSmps: array[ZG_MAX_SHADERSTAGE_IMAGES, ptr ID3D11SamplerState]
       # global subresourcedata array for texture updates
-      subResData: array[ZG_MAX_MIPMAPS * ZG_MAX_TEXTUREARRAY_LAYERS, D3D11_SUBRESOURCE_DATA]
+      subResDaa: array[ZG_MAX_MIPMAPS * ZG_MAX_TEXTUREARRAY_LAYERS, D3D11_SUBRESOURCE_DATA]
 
 type
   ZgPools = object
@@ -468,6 +472,7 @@ type
     images: seq[ZgImageP]
     shaders: seq[ZgShaderP]
     pipelines: seq[ZgPipelineP]
+    passes: seq[ZgPassP]
     contexts: seq[ZgContextP]
 
 
@@ -498,8 +503,137 @@ type
 
 var zg: ZgState
 
+when defined(Z_D3D11):
+  proc zgSetupBackend(desc: ZgDesc) =
+    assert(desc.d3d11Device != nil)
+    assert(desc.d3d11DeviceContext != nil)
+    assert(desc.d3d11RenderTargetViewCb != nil)
+    assert(desc.d3d11DepthStencilViewCb != nil)
+    assert(desc.d3d11RenderTargetViewCb != desc.d3d11DepthStencilViewCb)
+    zg.d3d11.valid = true
+    zg.d3d11.dev = cast[ptr ID3D11Device](desc.d3d11Device)
+    zg.d3d11.ctx = cast[ptr ID3D11DeviceContext](desc.d3d11DeviceContext)
+    zg.d3d11.rtvCb = desc.d3d11RenderTargetViewCb
+    zg.d3d11.dsvCb = desc.d3d11DepthStencilViewCb
+
+  proc zgD3d11ClearState() =
+    # clear all the device context state, so that resource refs don't
+    # stay stuck in the d3d device context
+    zg.d3d11.ctx.lpVtbl.OMSetRenderTargets(zg.d3d11.ctx, ZG_MAX_COLOR_ATTACHMENTS, addr zg.d3d11.zeroRtvs[0], nil)
+    zg.d3d11.ctx.lpVtbl.RSSetState(zg.d3d11.ctx, nil)
+    zg.d3d11.ctx.lpVtbl.OMSetDepthStencilState(zg.d3d11.ctx, nil, 0)
+    zg.d3d11.ctx.lpVtbl.OMSetBlendState(zg.d3d11.ctx, nil, [0.0'f32, 0.0, 0.0, 0.0], 0xFFFFFFFF'u32)
+    zg.d3d11.ctx.lpVtbl.IASetVertexBuffers(zg.d3d11.ctx, 0, ZG_MAX_SHADERSTAGE_BUFFERS, addr zg.d3d11.zeroVbs[0], addr zg.d3d11.zeroVbStrides[0], addr zg.d3d11.zeroVbOffsets[0])
+    zg.d3d11.ctx.lpVtbl.IASetIndexBuffer(zg.d3d11.ctx, nil, DXGI_FORMAT_UNKNOWN, 0)
+    zg.d3d11.ctx.lpVtbl.IASetInputLayout(zg.d3d11.ctx, nil)
+    zg.d3d11.ctx.lpVtbl.VSSetShader(zg.d3d11.ctx, nil, nil, 0)
+    zg.d3d11.ctx.lpVtbl.PSSetShader(zg.d3d11.ctx, nil, nil, 0)
+    zg.d3d11.ctx.lpVtbl.VSSetConstantBuffers(zg.d3d11.ctx, 0, ZG_MAX_SHADERSTAGE_UBS, addr zg.d3d11.zeroCbs[0])
+    zg.d3d11.ctx.lpVtbl.PSSetConstantBuffers(zg.d3d11.ctx, 0, ZG_MAX_SHADERSTAGE_UBS, addr zg.d3d11.zeroCbs[0])
+    zg.d3d11.ctx.lpVtbl.VSSetShaderResources(zg.d3d11.ctx, 0, ZG_MAX_SHADERSTAGE_IMAGES, addr zg.d3d11.zeroSrvs[0])
+    zg.d3d11.ctx.lpVtbl.PSSetShaderResources(zg.d3d11.ctx, 0, ZG_MAX_SHADERSTAGE_IMAGES, addr zg.d3d11.zeroSrvs[0])
+    zg.d3d11.ctx.lpVtbl.VSSetSamplers(zg.d3d11.ctx, 0, ZG_MAX_SHADERSTAGE_IMAGES, addr zg.d3d11.zeroSmps[0])
+    zg.d3d11.ctx.lpVtbl.PSSetSamplers(zg.d3d11.ctx, 0, ZG_MAX_SHADERSTAGE_IMAGES, addr zg.d3d11.zeroSmps[0])
+  
+  proc zgCreateContext(ctx: var ZgContextP): ZgResourceState =
+    result = ZG_RESOURCESTATE_VALID
+
+  proc zgResetStateCache() =
+    zgD3d11ClearState()
+
+  proc zgActivateContext(ctx: var ZgContextP) =
+    zgResetStateCache()
+
+proc zgInitPool(pool: var ZgPool, num: int) =
+  assert(num >= 1)
+  # slot 0 is reserved for the 'invalid id', so bump the pool size by 1
+  pool.size = num + 1
+  pool.queueTop = 0
+  # generation counters idexable by pool slot index, slot 0 is reserved
+  pool.genCtrs.setLen(pool.size)
+  zeroMem(addr pool.genCtrs[0], sizeof(uint32) * pool.size)
+  # not a bug to only reserve 'num' here
+  pool.freeQueue.setLen(num)
+  # never allocate zero-th pool item since the invalid id is 0
+  for i in countdown(pool.size - 1, 1):
+    pool.freeQueue[pool.queueTop] = i
+    inc(pool.queueTop)
+
 proc zgSetupPools(p: var ZgPools, desc: ZgDesc) =
-  discard
+  # note: the pools here will have an additional item, since slot 0 is reserved
+  assert((desc.bufferPoolSize > 0) and (desc.bufferPoolSize < ZG_MAX_POOL_SIZE))
+  zgInitPool(p.bufferPool, desc.bufferPoolSize)
+  p.buffers.setLen(p.bufferPool.size)
+  zeroMem(addr p.buffers[0], sizeof(ZgBufferP) * p.bufferPool.size)
+  
+  assert((desc.imagePoolSize > 0) and (desc.imagePoolSize < ZG_MAX_POOL_SIZE))
+  zgInitPool(p.imagePool, desc.imagePoolSize)
+  p.images.setLen(p.imagePool.size)
+  zeroMem(addr p.images[0], sizeof(ZgImageP) * p.imagePool.size)
+
+  assert((desc.shaderPoolSize > 0) and (desc.shaderPoolSize < ZG_MAX_POOL_SIZE))
+  zgInitPool(p.shaderPool, desc.shaderPoolSize)
+  p.shaders.setLen(p.shaderPool.size)
+  zeroMem(addr p.shaders[0], sizeof(ZgShaderP) * p.shaderPool.size)
+
+  assert((desc.pipelinePoolSize > 0) and (desc.pipelinePoolSize < ZG_MAX_POOL_SIZE))
+  zgInitPool(p.pipelinePool, desc.pipelinePoolSize)
+  p.pipelines.setLen(p.pipelinePool.size)
+  zeroMem(addr p.pipelines[0], sizeof(ZgPipelineP) * p.pipelinePool.size)
+
+  assert((desc.passPoolSize > 0) and (desc.passPoolSize < ZG_MAX_POOL_SIZE))
+  zgInitPool(p.passPool, desc.passPoolSize)
+  p.passes.setLen(p.passPool.size)
+  zeroMem(addr p.passes[0], sizeof(ZgPassP) * p.passPool.size)
+
+  assert((desc.contextPoolSize > 0) and (desc.contextPoolSize < ZG_MAX_POOL_SIZE))
+  zgInitPool(p.contextPool, desc.contextPoolSize)
+  p.contexts.setLen(p.contextPool.size)
+  zeroMem(addr p.contexts[0], sizeof(ZgContextP) * p.contextPool.size)
+
+proc zgPoolAllocIndex(pool: var ZgPool): int =
+  if pool.queueTop > 0:
+    dec(pool.queueTop)
+    let slotIndex = pool.freeQueue[pool.queueTop]
+    assert((slotIndex > 0) and (slotIndex < pool.size))
+    result = slotIndex
+  else:
+    # pool exhausted
+    result = ZG_INVALID_SLOT_INDEX
+
+proc zgSlotAlloc(pool: var ZgPool, slot: var ZgSlot, slotIndex: int): uint32 =
+  # FIXME: add handling for an overflowing generation counter
+  # for now, just overflow (another option is to disabled the slot)
+  assert((slotIndex > ZG_INVALID_SLOT_INDEX) and (slotIndex < pool.size))
+  assert((slot.state == ZG_RESOURCESTATE_INITIAL) and (slot.id == ZG_INVALID_ID))
+  inc(pool.genCtrs[slotIndex])
+  let ctr = pool.genCtrs[slotIndex]
+  slot.id = (ctr shl ZG_SLOT_SHIFT) or uint32(slotIndex and ZG_SLOT_MASK)
+  slot.state = ZG_RESOURCESTATE_ALLOC
+  result = slot.id
+
+proc zgSlotIndex(id: uint32): int =
+  result = int(id and ZG_SLOT_MASK)
+  assert(ZG_INVALID_SLOT_INDEX != result)
+
+proc zgContextAt(p: ZgPools, contextId: uint32): ZgContextP =
+  assert(ZG_INVALID_ID != contextId)
+  let slotIndex = zgSlotIndex(contextId)
+  assert((slotIndex > ZG_INVALID_SLOT_INDEX) and (slotIndex < p.contextPool.size))
+  result = p.contexts[slotIndex]
+
+proc zgSetupContext(): ZgContext =
+  let slotIndex = zgPoolAllocIndex(zg.pools.contextPool)
+  if ZG_INVALID_SLOT_INDEX != slotIndex:
+    result.id = zgSlotAlloc(zg.pools.contextPool, zg.pools.contexts[slotIndex].slot, slotIndex)
+    var ctx = zgContextAt(zg.pools, result.id)
+    ctx.slot.state = zgCreateContext(ctx)
+    assert(ctx.slot.state == ZG_RESOURCESTATE_VALID)
+    zgActivateContext(ctx)
+  else:
+    # pool is exhausted
+    result.id = ZG_INVALID_ID
+  zg.activeContext = result
 
 proc zgSetup*(desc: var ZgDesc) =
   assert((desc.startCanary == 0) and (desc.endCanary == 0))
@@ -515,3 +649,7 @@ proc zgSetup*(desc: var ZgDesc) =
   #TODO: Metal specific defaults
 
   zgSetupPools(zg.pools, zg.desc)
+  zg.frameIndex = 1
+  zgSetupBackend(zg.desc)
+  discard zgSetupContext()
+  zg.valid = true
