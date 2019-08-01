@@ -10,9 +10,13 @@ proc init() =
     d3d11DepthStencilViewCb: zappD3d11GetDepthStencilView
   )
   zgSetup(zgDesc)
+  passAction.colors[0].action = ZG_ACTION_CLEAR
+  passAction.colors[0].val = [1.0'f32, 0.0, 0.0, 1.0]
 
 proc frame() =
-  discard
+  let g = passAction.colors[0].val[1] + 0.1'f32
+  passAction.colors[0].val[1] = if g > 1.0: 0.0'f32 else: g
+  zgBeginDefaultPass(passAction, zappWidth(), zappHeight())
 
 proc cleanUp() =
   discard

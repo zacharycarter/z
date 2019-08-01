@@ -22,6 +22,19 @@ const
   ZG_MAX_TEXTUREARRAY_LAYERS = 128
   ZG_INVALID_SLOT_INDEX = 0
 
+when not defined(ZG_DEFAULT_CLEAR_RED):
+  const ZG_DEFAULT_CLEAR_RED = 0.5'f32
+when not defined(ZG_DEFAULT_CLEAR_GREEN):
+  const ZG_DEFAULT_CLEAR_GREEN = 0.5'f32
+when not defined(ZG_DEFAULT_CLEAR_BLUE):
+  const ZG_DEFAULT_CLEAR_BLUE = 0.5'f32
+when not defined(ZG_DEFAULT_CLEAR_ALPHA):
+  const ZG_DEFAULT_CLEAR_ALPHA = 1.0'f32
+when not defined(ZG_DEFAULT_CLEAR_DEPTH):
+  const ZG_DEFAULT_CLEAR_DEPTH = 1.0'f32
+when not defined(ZG_DEFAULT_CLEAR_STENCIL):
+  const ZG_DEFAULT_CLEAR_STENCIL = 0
+
 template zgDef(val, def: untyped): untyped =
   (if ((val) == 0): (def) else: (val))
 
@@ -47,7 +60,7 @@ type
   ZgStr = object
     buf: array[ZG_STRING_SIZE, char]
 
-  ZgAction {.size: sizeof(uint32).} = enum
+  ZgAction* {.size: sizeof(uint32).} = enum
     ZG_ACTION_DEFAULT
     ZG_ACTION_CLEAR
     ZG_ACTION_LOAD
@@ -55,9 +68,9 @@ type
     ZG_ACTION_COUNT
     ZG_ACTION_FORCE_U32 = 0x7FFFFFFF
 
-  ZgColorAttachmentAction = object
-    action: ZgAction
-    val: array[4, float32]
+  ZgColorAttachmentAction* = object
+    action*: ZgAction
+    val*: array[4, float32]
   
   ZgDepthAttachmentAction = object
     action: ZgAction
@@ -69,7 +82,7 @@ type
   
   ZgPassAction* = object
     startCanary: uint32
-    colors: array[ZG_MAX_COLOR_ATTACHMENTS, ZgColorAttachmentAction]
+    colors*: array[ZG_MAX_COLOR_ATTACHMENTS, ZgColorAttachmentAction]
     depth: ZgDepthAttachmentAction
     stencil: ZgStencilAttachmentAction
     endCanary: uint32
@@ -344,7 +357,7 @@ when defined(Z_D3D11):
       width: int
       height: int
       depth: int
-      numMipMaps: int
+      numMipMaps: uint32
       usage: ZgUsage
       pixelFormat: ZgPixelFormat
       sampleCount: int
@@ -413,8 +426,8 @@ when defined(Z_D3D11):
     ZgAttachment = object
       image: ptr ZgImageP
       imageId: ZgImage
-      mipLevel: int
-      slice: int
+      mipLevel: uint32
+      slice: uint32
     
     ZgPassP = object
       slot: ZgSlot
@@ -442,7 +455,7 @@ when defined(Z_D3D11):
       curPassId: ZgPass
       curPipeline: ptr ZgPipelineP
       curPipelineId: ZgPipeline
-      crRtvs: array[ZG_MAX_COLOR_ATTACHMENTS, ptr ID3D11RenderTargetView]
+      curRtvs: array[ZG_MAX_COLOR_ATTACHMENTS, ptr ID3D11RenderTargetView]
       curDsv: ptr ID3D11DepthStencilView
       # on-demand loaded d3dcompiler_47.dll handles
       d3dCompilerDll: HINSTANCE
@@ -543,8 +556,88 @@ when defined(Z_D3D11):
 
   proc zgActivateContext(ctx: var ZgContextP) =
     zgResetStateCache()
+  
+  proc zgBeginPass(pass: ptr ZgPassP; action: ZgPassAction; w, h: int32) =
+    assert(not zg.d3d11.inPass)
+    zg.d3d11.inPass = true
+    zg.d3d11.curWidth = w
+    zg.d3d11.curHeight = h
+    if pass != nil:
+      zg.d3d11.curPass = pass
+      zg.d3d11.curPassId.id = pass[].slot.id
+      zg.d3d11.numRtvs = 0
+      for i in 0 ..< ZG_MAX_COLOR_ATTACHMENTS:
+        zg.d3d11.curRtvs[i] = pass[].d3d11Rtvs[i]
+        if zg.d3d11.curRtvs[i] != nil:
+          inc(zg.d3d11.numRtvs)
+      zg.d3d11.curDsv = pass[].d3d11Dsv
+    else:
+      # render to default frame buffer
+      zg.d3d11.curPass = nil
+      zg.d3d11.curPassId.id = ZG_INVALID_ID
+      zg.d3d11.numRtvs = 1
+      zg.d3d11.curRtvs[0] = cast[ptr ID3D11RenderTargetView](zg.d3d11.rtvCb())
+      for i in 1 ..< ZG_MAX_COLOR_ATTACHMENTS:
+        zg.d3d11.curRtvs[i] = nil
+      zg.d3d11.curDsv = cast[ptr ID3D11DepthStencilView](zg.d3d11.dsvCb())
+      assert((zg.d3d11.curRtvs[0] != nil) and (zg.d3d11.curDsv != nil))
+    # apply the render-target- and depth-stencil-views
+    zg.d3d11.ctx.lpVtbl.OMSetRenderTargets(zg.d3d11.ctx, ZG_MAX_COLOR_ATTACHMENTS, addr zg.d3d11.curRtvs[0], zg.d3d11.curDsv)
 
-proc zgInitPool(pool: var ZgPool, num: int) =
+    # set viewport and scissor rect to cover the whole screen
+    var vp: D3D11_VIEWPORT
+    vp.Width = float32(w)
+    vp.Height = float32(h)
+    vp.MaxDepth = 1.0'f32
+    zg.d3d11.ctx.lpVtbl.RSSetViewports(zg.d3d11.ctx, 1, addr vp)
+    var rect: D3D11_RECT
+    rect.left = 0
+    rect.top = 0
+    rect.right = w
+    rect.bottom = h
+    zg.d3d11.ctx.lpVtbl.RSSetScissorRects(zg.d3d11.ctx, 1, addr rect)
+
+    # perform clear action
+    for i in 0 ..< zg.d3d11.numRtvs:
+      if action.colors[i].action == ZG_ACTION_CLEAR:
+        zg.d3d11.ctx.lpVtbl.ClearRenderTargetView(zg.d3d11.ctx, zg.d3d11.curRtvs[i], action.colors[i].val)
+    var dsFlags: uint32
+    if action.depth.action == ZG_ACTION_CLEAR:
+      dsFlags = dsFlags or D3D11_CLEAR_DEPTH.ord()
+    if action.stencil.action == ZG_ACTION_CLEAR:
+      dsFlags = dsFlags or D3D11_CLEAR_STENCIL.ord()
+    if (0'u32 != dsFlags) and (zg.d3d11.curDsv != nil):
+      zg.d3d11.ctx.lpVtbl.ClearDepthStencilView(zg.d3d11.ctx, zg.d3d11.curDsv, dsFlags, action.depth.val, action.stencil.val)
+  
+  proc zgD3d11CalcSubResource(mipSlice, arraySlice, mipLevels: uint32): uint32 =
+    result = mipSlice + arraySlice * mipLevels
+
+  proc zgEndPassP() =
+    assert(zg.d3d11.inPass and zg.d3d11.ctx != nil)
+    zg.d3d11.inPass = false
+
+    # need to resolve MSAA render target into texture?
+    if zg.d3d11.curPass != nil:
+      assert(zg.d3d11.curPass[].slot.id == zg.d3d11.curPassId.id)
+      for i in 0 ..< zg.d3d11.numRtvs:
+        var att = zg.d3d11.curPass[].colorAtts[i]
+        assert(att.image[].slot.id == att.imageId.id)
+        if att.image[].sampleCount > 1:
+          assert((att.image[].d3d11Tex2d != nil) and (att.image[].d3d11TexMsaa != nil) and (att.image[].d3d11Tex3d != nil))
+          assert(DXGI_FORMAT_UNKNOWN != att.image[].d3d11Format)
+          let 
+            img = att.image
+            dstSubres = zgd3d11CalcSubResource(att.mipLevel, att.slice, img.numMipMaps)
+          zg.d3d11.ctx.lpVtbl.ResolveSubresource(
+            zg.d3d11.ctx,
+            cast[ptr ID3D11Resource](img[].d3d11Tex2d),
+            dstSubres,
+            cast[ptr ID3D11Resource](img[].d3d11TexMsaa),
+            0,
+            img[].d3d11Format
+          )
+
+proc zgInitPool(pool: var ZgPool; num: int) =
   assert(num >= 1)
   # slot 0 is reserved for the 'invalid id', so bump the pool size by 1
   pool.size = num + 1
@@ -559,7 +652,7 @@ proc zgInitPool(pool: var ZgPool, num: int) =
     pool.freeQueue[pool.queueTop] = i
     inc(pool.queueTop)
 
-proc zgSetupPools(p: var ZgPools, desc: ZgDesc) =
+proc zgSetupPools(p: var ZgPools; desc: ZgDesc) =
   # note: the pools here will have an additional item, since slot 0 is reserved
   assert((desc.bufferPoolSize > 0) and (desc.bufferPoolSize < ZG_MAX_POOL_SIZE))
   zgInitPool(p.bufferPool, desc.bufferPoolSize)
@@ -601,7 +694,7 @@ proc zgPoolAllocIndex(pool: var ZgPool): int =
     # pool exhausted
     result = ZG_INVALID_SLOT_INDEX
 
-proc zgSlotAlloc(pool: var ZgPool, slot: var ZgSlot, slotIndex: int): uint32 =
+proc zgSlotAlloc(pool: var ZgPool; slot: var ZgSlot; slotIndex: int): uint32 =
   # FIXME: add handling for an overflowing generation counter
   # for now, just overflow (another option is to disabled the slot)
   assert((slotIndex > ZG_INVALID_SLOT_INDEX) and (slotIndex < pool.size))
@@ -616,7 +709,7 @@ proc zgSlotIndex(id: uint32): int =
   result = int(id and ZG_SLOT_MASK)
   assert(ZG_INVALID_SLOT_INDEX != result)
 
-proc zgContextAt(p: ZgPools, contextId: uint32): ZgContextP =
+proc zgContextAt(p: ZgPools; contextId: uint32): ZgContextP =
   assert(ZG_INVALID_ID != contextId)
   let slotIndex = zgSlotIndex(contextId)
   assert((slotIndex > ZG_INVALID_SLOT_INDEX) and (slotIndex < p.contextPool.size))
@@ -653,3 +746,35 @@ proc zgSetup*(desc: var ZgDesc) =
   zgSetupBackend(zg.desc)
   discard zgSetupContext()
   zg.valid = true
+
+proc zgResolveDefaultPassAction(`from`: ZgPassAction; to: var ZgPassAction) =
+  to = `from`
+  for i in 0 ..< ZG_MAX_COLOR_ATTACHMENTS:
+    if to.colors[i].action == ZG_ACTION_DEFAULT:
+      to.colors[i].action = ZG_ACTION_CLEAR
+      to.colors[i].val[0] = ZG_DEFAULT_CLEAR_RED
+      to.colors[i].val[1] = ZG_DEFAULT_CLEAR_GREEN
+      to.colors[i].val[2] = ZG_DEFAULT_CLEAR_BLUE
+      to.colors[i].val[3] = ZG_DEFAULT_CLEAR_ALPHA
+  if to.depth.action == ZG_ACTION_DEFAULT:
+    to.depth.action = ZG_ACTION_CLEAR
+    to.depth.val = ZG_DEFAULT_CLEAR_DEPTH
+  if to.stencil.action == ZG_ACTION_DEFAULT:
+    to.stencil.action = ZG_ACTION_CLEAR
+    to.stencil.val = ZG_DEFAULT_CLEAR_STENCIL
+
+proc zgBeginDefaultPass*(passAction: ZgPassAction; width, height: int32) =
+  assert((passAction.startCanary == 0) and (passAction.endCanary == 0))
+  var pa: ZgPassAction
+  zgResolveDefaultPassAction(passAction, pa)
+  zg.curPass.id = ZG_INVALID_ID
+  zg.passValid = true
+  zgBeginPass(nil, pa, width, height)
+
+proc zgEndPass() =
+  if not zg.passValid:
+    return
+  zgEndPassP()
+  zg.curPass.id = ZG_INVALID_ID
+  zg.curPipeline.id = ZG_INVALID_ID
+  zg.passValid = false

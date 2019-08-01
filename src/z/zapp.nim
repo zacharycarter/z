@@ -215,10 +215,10 @@ type
 
   Zapp = object
     valid: bool
-    windowWidth: int
-    windowHeight: int
-    frameBufferWidth: int
-    frameBufferHeight: int
+    windowWidth: int32
+    windowHeight: int32
+    frameBufferWidth: int32
+    frameBufferHeight: int32
     sampleCount: int
     swapInterval: int
     dpiScale: float32
@@ -640,13 +640,13 @@ when defined(windows):
     var rect: RECT
 
     if GetClientRect(zappWin32Hwnd, addr rect):
-      zapp.windowWidth = int(float32((rect.right - rect.left)) / zappWin32WindowScale)
-      zapp.windowHeight = int(float32((rect.bottom - rect.top)) / zappWin32WindowScale)
-      let fbWidth = int(float32(zapp.windowWidth) * zappWin32ContentScale)
-      let fbHeight = int(float32(zapp.windowHeight) * zappWin32ContentScale)
+      zapp.windowWidth = int32(float32((rect.right - rect.left)) / zappWin32WindowScale)
+      zapp.windowHeight = int32(float32((rect.bottom - rect.top)) / zappWin32WindowScale)
+      let fbWidth = int32(float32(zapp.windowWidth) * zappWin32ContentScale)
+      let fbHeight = int32(float32(zapp.windowHeight) * zappWin32ContentScale)
       if fbWidth != zapp.frameBufferWidth or fbHeight != zapp.frameBufferHeight:
-        zapp.frameBufferWidth = int(float32(zapp.windowWidth) * zappWin32ContentScale)
-        zapp.frameBufferHeight = int(float32(zapp.windowHeight) * zappWin32ContentScale)
+        zapp.frameBufferWidth = int32(float32(zapp.windowWidth) * zappWin32ContentScale)
+        zapp.frameBufferHeight = int32(float32(zapp.windowHeight) * zappWin32ContentScale)
         # prevent a framebuffer size of 0 when window is minimized
         if zapp.frameBufferWidth == 0:
           zapp.frameBufferWidth = 1
@@ -879,6 +879,12 @@ when defined(windows):
       zappD3d11DestroyDefaultRenderTarget()
       zappD3d11DestroyDeviceAndSwapChain()
     zappWin32DestroyWindow()
+
+proc zappWidth*(): int32 =
+  result = if zapp.frameBufferWidth > 0: zapp.frameBufferWidth else: 1
+    
+proc zappHeight*(): int32 =
+  result = if zapp.frameBufferHeight > 0: zapp.frameBufferHeight else:1
 
 proc zMain*(): ZappDesc =
   result

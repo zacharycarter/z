@@ -11,3 +11,5 @@ srcDir        = "src"
 # Dependencies
 
 requires "nim >= 0.20.2"
+requires "winim >= 3.2.1"
+requires "https://github.com/zacharycarter/directnimrod.git"
