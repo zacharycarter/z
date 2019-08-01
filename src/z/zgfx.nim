@@ -1,3 +1,5 @@
+import options, sequtils
+
 const 
   ZG_STRING_SIZE = 16
   ZG_SLOT_SHIFT = 16
@@ -37,6 +39,9 @@ when not defined(ZG_DEFAULT_CLEAR_STENCIL):
 
 template zgDef(val, def: untyped): untyped =
   (if ((val) == 0): (def) else: (val))
+
+template Z_FREE(p: untyped) =
+  dealloc(p)
 
 type
   ZgBuffer = object
@@ -339,7 +344,7 @@ when defined(Z_D3D11):
   
   #== D3D11 BACKEND DECLARATIONS ==#
   type
-    ZgBufferP = object
+    ZgBufferP = ref object
       slot: ZgSlot
       size: int
       appendPos: int
@@ -350,7 +355,7 @@ when defined(Z_D3D11):
       appendFrameIndex: uint32
       d3d11Buf: ptr ID3D11Buffer
     
-    ZgImageP = object
+    ZgImageP = ref object
       slot: ZgSlot
       kind: ZgImageKind
       renderTarget: bool
@@ -394,7 +399,7 @@ when defined(Z_D3D11):
       images: array[ZG_MAX_SHADERSTAGE_IMAGES, ZgShaderImage]
       d3d11Cbs: array[ZG_MAX_SHADERSTAGE_UBS, ptr ID3D11Buffer]
     
-    ZgShaderP = object
+    ZgShaderP = ref object
       slot: ZgSlot
       attrs: array[ZG_MAX_VERTEX_ATTRIBUTES, ZgShaderAttr]
       stage: array[ZG_NUM_SHADER_STAGES, ZgShaderStage]
@@ -403,9 +408,9 @@ when defined(Z_D3D11):
       d3d11VsBlob: pointer
       d3d11VsBlobLength: int
     
-    ZgPipelineP = object
+    ZgPipelineP = ref object
       slot: ZgSlot
-      shader: ptr ZgShaderP
+      shader: ZgShaderP
       shaderId: ZgShader
       indexKind: ZgIndexKind
       vertexLayoutValid: array[ZG_MAX_SHADERSTAGE_BUFFERS, bool]
@@ -424,12 +429,12 @@ when defined(Z_D3D11):
       d3d11Bs: ptr ID3D11BlendState
 
     ZgAttachment = object
-      image: ptr ZgImageP
+      image: ZgImageP
       imageId: ZgImage
       mipLevel: uint32
       slice: uint32
     
-    ZgPassP = object
+    ZgPassP = ref object
       slot: ZgSlot
       numColorAtts: int
       colorAtts: array[ZG_MAX_COLOR_ATTACHMENTS, ZgAttachment]
@@ -437,7 +442,7 @@ when defined(Z_D3D11):
       d3d11Rtvs: array[ZG_MAX_COLOR_ATTACHMENTS, ptr ID3D11RenderTargetView]
       d3d11Dsv: ptr ID3D11DepthStencilView
     
-    ZgContextP = object
+    ZgContextP = ref object
       slot: ZgSlot
     
     ZgD3d11Backend = object
@@ -451,9 +456,9 @@ when defined(Z_D3D11):
       curWidth: int
       curHeight: int
       numRtvs: int
-      curPass: ptr ZgPassP
+      curPass: ZgPassP
       curPassId: ZgPass
-      curPipeline: ptr ZgPipelineP
+      curPipeline: ZgPipelineP
       curPipelineId: ZgPipeline
       curRtvs: array[ZG_MAX_COLOR_ATTACHMENTS, ptr ID3D11RenderTargetView]
       curDsv: ptr ID3D11DepthStencilView
@@ -548,29 +553,30 @@ when defined(Z_D3D11):
     zg.d3d11.ctx.lpVtbl.VSSetSamplers(zg.d3d11.ctx, 0, ZG_MAX_SHADERSTAGE_IMAGES, addr zg.d3d11.zeroSmps[0])
     zg.d3d11.ctx.lpVtbl.PSSetSamplers(zg.d3d11.ctx, 0, ZG_MAX_SHADERSTAGE_IMAGES, addr zg.d3d11.zeroSmps[0])
   
-  proc zgCreateContext(ctx: var ZgContextP): ZgResourceState =
+  proc zgCreateContext(ctx: ZgContextP): ZgResourceState =
     result = ZG_RESOURCESTATE_VALID
 
   proc zgResetStateCache() =
     zgD3d11ClearState()
 
-  proc zgActivateContext(ctx: var ZgContextP) =
+  proc zgActivateContext(ctx: ZgContextP) =
     zgResetStateCache()
   
-  proc zgBeginPass(pass: ptr ZgPassP; action: ZgPassAction; w, h: int32) =
+  proc zgBeginPass(pass: Option[ZgPassP]; action: ZgPassAction; w, h: int32) =
     assert(not zg.d3d11.inPass)
     zg.d3d11.inPass = true
     zg.d3d11.curWidth = w
     zg.d3d11.curHeight = h
-    if pass != nil:
+    if pass.isSome():
+      var pass = get(pass)
       zg.d3d11.curPass = pass
-      zg.d3d11.curPassId.id = pass[].slot.id
+      zg.d3d11.curPassId.id = pass.slot.id
       zg.d3d11.numRtvs = 0
       for i in 0 ..< ZG_MAX_COLOR_ATTACHMENTS:
-        zg.d3d11.curRtvs[i] = pass[].d3d11Rtvs[i]
+        zg.d3d11.curRtvs[i] = pass.d3d11Rtvs[i]
         if zg.d3d11.curRtvs[i] != nil:
           inc(zg.d3d11.numRtvs)
-      zg.d3d11.curDsv = pass[].d3d11Dsv
+      zg.d3d11.curDsv = pass.d3d11Dsv
     else:
       # render to default frame buffer
       zg.d3d11.curPass = nil
@@ -636,6 +642,76 @@ when defined(Z_D3D11):
             0,
             img[].d3d11Format
           )
+    zg.d3d11.curPass = nil
+    zg.d3d11.curPassId.id = ZG_INVALID_ID
+    zg.d3d11.curPipeline = nil
+    zg.d3d11.curPipelineId.id = ZG_INVALID_ID
+    for i in 0 ..< ZG_MAX_COLOR_ATTACHMENTS:
+      zg.d3d11.curRtvs[i] = nil
+    zg.d3d11.curDsv = nil
+    zgD3d11ClearState()
+  
+  proc zgDestroyBuffer(buf: ZgBufferP) =
+    assert(buf != nil)
+    if buf.d3d11Buf != nil:
+      discard buf.d3d11Buf.lpVtbl.Release(buf.d3d11Buf)
+  
+  proc zgDestroyImage(img: ZgImageP) =
+    assert(img != nil)
+    if img.d3d11Tex2d != nil:
+      discard img.d3d11Tex2d.lpVtbl.Release(img.d3d11Tex2d)
+    if img.d3d11Tex3d != nil:
+      discard img.d3d11Tex3d.lpVtbl.Release(img.d3d11Tex3d)
+    if img.d3d11TexDs != nil:
+      discard img.d3d11TexDs.lpVtbl.Release(img.d3d11TexDs)
+    if img.d3d11TexMsaa != nil:
+      discard img.d3d11TexMsaa.lpVtbl.Release(img.d3d11TexMsaa)
+    if img.d3d11Srv != nil:
+      discard img.d3d11Srv.lpVtbl.Release(img.d3d11Srv)
+    if img.d3d11Smp != nil:
+      discard img.d3d11Smp.lpVtbl.Release(img.d3d11Smp)
+
+  proc zgDestroyContext(ctx: ZgContextP) =
+    assert(ctx != nil)
+    discard
+    # empty
+
+  proc zgDestroyShader(shd: ZgShaderP) =
+    assert(shd != nil)
+    if shd.d3d11Vs != nil:
+      discard shd.d3d11Vs.lpVtbl.Release(shd.d3d11Vs)
+    if shd.d3d11Fs != nil:
+      discard shd.d3d11Fs.lpVtbl.Release(shd.d3d11Fs)
+    if shd.d3d11VsBlob != nil:
+      Z_FREE(shd.d3d11VsBlob)
+    for stageIndex in 0 ..< ZG_NUM_SHADER_STAGES:
+      let stage = shd.stage[stageIndex]
+      for ubIndex in 0 ..< stage.numUniformBlocks:
+        if stage.d3d11Cbs[ubIndex] != nil:
+          discard stage.d3d11Cbs[ubIndex].lpVtbl.Release(stage.d3d11Cbs[ubIndex])
+  
+  proc zgDestroyPipeline(pip: ZgPipelineP) =
+    assert(pip != nil)
+    if pip.d3d11Il != nil:
+      discard pip.d3d11Il.lpVtbl.Release(pip.d3d11Il)
+    if pip.d3d11Rs != nil:
+      discard pip.d3d11Rs.lpVtbl.Release(pip.d3d11Rs)
+    if pip.d3d11Dss != nil:
+      discard pip.d3d11Dss.lpVtbl.Release(pip.d3d11Dss)
+    if pip.d3d11Bs != nil:
+      discard pip.d3d11Bs.lpVtbl.Release(pip.d3d11Bs)
+  
+  proc zgDestroyPass(pass: ZgPassP) =
+    assert(pass != nil)
+    for i in 0 ..< ZG_MAX_COLOR_ATTACHMENTS:
+      if pass.d3d11Rtvs[i] != nil:
+        discard pass.d3d11Rtvs[i].lpVtbl.Release(pass.d3d11Rtvs[i])
+    if pass.d3d11Dsv != nil:
+      discard pass.d3d11Dsv.lpVtbl.Release(pass.d3d11Dsv)
+  
+  proc zgDiscardBackend() =
+    assert(zg.d3d11.valid)
+    zg.d3d11.valid = false
 
 proc zgInitPool(pool: var ZgPool; num: int) =
   assert(num >= 1)
@@ -656,33 +732,27 @@ proc zgSetupPools(p: var ZgPools; desc: ZgDesc) =
   # note: the pools here will have an additional item, since slot 0 is reserved
   assert((desc.bufferPoolSize > 0) and (desc.bufferPoolSize < ZG_MAX_POOL_SIZE))
   zgInitPool(p.bufferPool, desc.bufferPoolSize)
-  p.buffers.setLen(p.bufferPool.size)
-  zeroMem(addr p.buffers[0], sizeof(ZgBufferP) * p.bufferPool.size)
+  p.buffers = newSeqWith(p.bufferPool.size, new ZgBufferP)
   
   assert((desc.imagePoolSize > 0) and (desc.imagePoolSize < ZG_MAX_POOL_SIZE))
   zgInitPool(p.imagePool, desc.imagePoolSize)
-  p.images.setLen(p.imagePool.size)
-  zeroMem(addr p.images[0], sizeof(ZgImageP) * p.imagePool.size)
+  p.images = newSeqWith(p.imagePool.size, new ZgImageP)
 
   assert((desc.shaderPoolSize > 0) and (desc.shaderPoolSize < ZG_MAX_POOL_SIZE))
   zgInitPool(p.shaderPool, desc.shaderPoolSize)
-  p.shaders.setLen(p.shaderPool.size)
-  zeroMem(addr p.shaders[0], sizeof(ZgShaderP) * p.shaderPool.size)
+  p.shaders = newSeqWith(p.shaderPool.size, new ZgShaderP)
 
   assert((desc.pipelinePoolSize > 0) and (desc.pipelinePoolSize < ZG_MAX_POOL_SIZE))
   zgInitPool(p.pipelinePool, desc.pipelinePoolSize)
-  p.pipelines.setLen(p.pipelinePool.size)
-  zeroMem(addr p.pipelines[0], sizeof(ZgPipelineP) * p.pipelinePool.size)
+  p.pipelines = newSeqWith(p.pipelinePool.size, new ZgPipelineP)
 
   assert((desc.passPoolSize > 0) and (desc.passPoolSize < ZG_MAX_POOL_SIZE))
   zgInitPool(p.passPool, desc.passPoolSize)
-  p.passes.setLen(p.passPool.size)
-  zeroMem(addr p.passes[0], sizeof(ZgPassP) * p.passPool.size)
+  p.passes = newSeqWith(p.passPool.size, new ZgPassP)
 
   assert((desc.contextPoolSize > 0) and (desc.contextPoolSize < ZG_MAX_POOL_SIZE))
   zgInitPool(p.contextPool, desc.contextPoolSize)
-  p.contexts.setLen(p.contextPool.size)
-  zeroMem(addr p.contexts[0], sizeof(ZgContextP) * p.contextPool.size)
+  p.contexts = newSeqWith(p.contextPool.size, new ZgContextP)
 
 proc zgPoolAllocIndex(pool: var ZgPool): int =
   if pool.queueTop > 0:
@@ -709,7 +779,7 @@ proc zgSlotIndex(id: uint32): int =
   result = int(id and ZG_SLOT_MASK)
   assert(ZG_INVALID_SLOT_INDEX != result)
 
-proc zgContextAt(p: ZgPools; contextId: uint32): ZgContextP =
+proc zgContextAt(p: var ZgPools; contextId: uint32): ZgContextP =
   assert(ZG_INVALID_ID != contextId)
   let slotIndex = zgSlotIndex(contextId)
   assert((slotIndex > ZG_INVALID_SLOT_INDEX) and (slotIndex < p.contextPool.size))
@@ -718,6 +788,8 @@ proc zgContextAt(p: ZgPools; contextId: uint32): ZgContextP =
 proc zgSetupContext(): ZgContext =
   let slotIndex = zgPoolAllocIndex(zg.pools.contextPool)
   if ZG_INVALID_SLOT_INDEX != slotIndex:
+    echo zg.pools.contextPool
+    echo repr zg.pools.contexts
     result.id = zgSlotAlloc(zg.pools.contextPool, zg.pools.contexts[slotIndex].slot, slotIndex)
     var ctx = zgContextAt(zg.pools, result.id)
     ctx.slot.state = zgCreateContext(ctx)
@@ -762,6 +834,45 @@ proc zgResolveDefaultPassAction(`from`: ZgPassAction; to: var ZgPassAction) =
   if to.stencil.action == ZG_ACTION_DEFAULT:
     to.stencil.action = ZG_ACTION_CLEAR
     to.stencil.val = ZG_DEFAULT_CLEAR_STENCIL
+  
+proc zgLookupContext(p: var ZgPools, ctxId: uint32): ZgContextP =
+  if ZG_INVALID_ID != ctxId:
+    result = zgContextAt(p, ctxId)
+    if result.slot.id == ctxId:
+      return result
+
+proc zgDestroyAllResources(p: ZgPools, ctxId: uint32) =
+  #[ this is a bit dumb since it loops over all pool slots to
+     find the occupied slots. it is only executed at shutdown
+     NOTE: ONLY EXECUTE AT SHUTDOWN
+      ...because the free queues will not be reset and the
+      resource slots will not be cleared!
+  ]#
+  for i in 1 ..< p.bufferPool.size:
+    if p.buffers[i].slot.ctxId == ctxId:
+      let state = p.buffers[i].slot.state
+      if (state == ZG_RESOURCESTATE_VALID) or (state == ZG_RESOURCESTATE_FAILED):
+        zgDestroyBuffer(p.buffers[i])
+  for i in 1 ..< p.imagePool.size:
+    if p.images[i].slot.ctxId == ctxId:
+      let state = p.images[i].slot.state
+      if (state == ZG_RESOURCESTATE_VALID) or (state == ZG_RESOURCESTATE_FAILED):
+        zgDestroyImage(p.images[i])
+  for i in 1 ..< p.shaderPool.size:
+    if p.shaders[i].slot.ctxId == ctxId:
+      let state = p.shaders[i].slot.state
+      if (state == ZG_RESOURCESTATE_VALID) or (state == ZG_RESOURCESTATE_FAILED):
+        zgDestroyShader(p.shaders[i])
+  for i in 1 ..< p.pipelinePool.size:
+    if p.pipelines[i].slot.ctxId == ctxId:
+      let state = p.pipelines[i].slot.state
+      if (state == ZG_RESOURCESTATE_VALID) or (state == ZG_RESOURCESTATE_FAILED):
+        zgDestroyPipeline(p.pipelines[i])
+  for i in 1 ..< p.passPool.size:
+    if p.passes[i].slot.ctxId == ctxId:
+      let state = p.passes[i].slot.state
+      if (state == ZG_RESOURCESTATE_VALID) or (state == ZG_RESOURCESTATE_FAILED):
+        zgDestroyPass(p.passes[i])
 
 proc zgBeginDefaultPass*(passAction: ZgPassAction; width, height: int32) =
   assert((passAction.startCanary == 0) and (passAction.endCanary == 0))
@@ -769,12 +880,43 @@ proc zgBeginDefaultPass*(passAction: ZgPassAction; width, height: int32) =
   zgResolveDefaultPassAction(passAction, pa)
   zg.curPass.id = ZG_INVALID_ID
   zg.passValid = true
-  zgBeginPass(nil, pa, width, height)
+  zgBeginPass(none(ZgPassP), pa, width, height)
 
-proc zgEndPass() =
+proc zgEndPass*() =
   if not zg.passValid:
     return
   zgEndPassP()
   zg.curPass.id = ZG_INVALID_ID
   zg.curPipeline.id = ZG_INVALID_ID
   zg.passValid = false
+
+proc zgCommit*() =
+  assert(not zg.d3d11.inPass)
+
+proc zgDiscardPool(pool: var ZgPool) =
+  pool.freeQueue.setLen(0)
+  pool.genCtrs.setLen(0)
+  pool.size = 0
+  pool.queueTop = 0
+
+proc zgDiscardPools(p: var ZgPools) =
+  p.contexts.setLen(0)
+  p.passes.setLen(0)
+  p.pipelines.setLen(0)
+  p.shaders.setLen(0)
+  p.images.setLen(0)
+  p.buffers.setLen(0)
+  zgDiscardPool(p.contextPool)
+
+proc zgShutdown*() =
+  # can only delete resources for the currently set context here
+  # if multiple contexts are used, the app code must take care of
+  # properly releasing them (since only the app code can switch
+  # between 3D-API contexts)
+  if zg.activeContext.id != ZG_INVALID_ID:
+    var ctx = zgLookupContext(zg.pools, zg.activeContext.id)
+    if ctx != nil:
+      zgDestroyAllResources(zg.pools, zg.activeContext.id)
+      zgDestroyContext(ctx)
+  zgDiscardBackend()
+  zgDiscardPools(zg.pools)

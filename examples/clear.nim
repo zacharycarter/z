@@ -14,12 +14,14 @@ proc init() =
   passAction.colors[0].val = [1.0'f32, 0.0, 0.0, 1.0]
 
 proc frame() =
-  let g = passAction.colors[0].val[1] + 0.1'f32
+  let g = passAction.colors[0].val[1] + 0.01'f32
   passAction.colors[0].val[1] = if g > 1.0: 0.0'f32 else: g
   zgBeginDefaultPass(passAction, zappWidth(), zappHeight())
+  zgEndPass()
+  zgCommit()
 
 proc cleanUp() =
-  discard
+  zgShutdown()
 
 proc event(e: var ZappEvent) =
   discard
